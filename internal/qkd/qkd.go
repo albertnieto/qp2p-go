@@ -2,129 +2,196 @@ package qkd
 
 import (
 	"bufio"
+	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
-	"math/rand"
+	"math"
 	"net"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/albertnieto/qp2p-go/pkg/logger"
 )
 
-const (
-	QuantumPort   = ":8080"
-	ClassicalPort = ":8081"
-)
-
 type Peer struct {
-	Address       string
+	LocalAddr     string
+	PeerAddr      string
 	QuantumConn   net.Conn
 	ClassicalConn net.Conn
 	Key           []int
+	QuantumPort   int
+	ClassicalPort int
+	mu            sync.RWMutex
+	ctx           context.Context
+	cancel        context.CancelFunc
 }
 
-func NewPeer(localAddr, peerAddr string) *Peer {
+func NewPeer(localAddr, peerAddr string, quantumPort, classicalPort int) *Peer {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Peer{
-		Address: localAddr,
+		LocalAddr:     localAddr,
+		PeerAddr:      peerAddr,
+		QuantumPort:   quantumPort,
+		ClassicalPort: classicalPort,
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 }
 
-func (p *Peer) Start() {
+func (p *Peer) Start() error {
 	logger.Info.Println("Starting QKD Peer")
 
-	go p.startQuantumServer()
-	go p.startClassicalServer()
+	errChan := make(chan error, 2)
+	go func() {
+		if err := p.startQuantumServer(); err != nil {
+			errChan <- fmt.Errorf("quantum server error: %v", err)
+		}
+	}()
 
-	p.connectToPeer(p.Address)
+	go func() {
+		if err := p.startClassicalServer(); err != nil {
+			errChan <- fmt.Errorf("classical server error: %v", err)
+		}
+	}()
 
-	p.initiateQKD()
+	if err := p.connectToPeer(); err != nil {
+		return err
+	}
+
+	select {
+	case err := <-errChan:
+		return err
+	case <-time.After(10 * time.Second):
+		return p.initiateQKD()
+	}
 }
 
-func (p *Peer) startQuantumServer() {
-	ln, err := net.Listen("tcp", QuantumPort)
+func (p *Peer) startQuantumServer() error {
+	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", p.LocalAddr, p.QuantumPort))
 	if err != nil {
-		logger.Error.Fatalf("Error starting quantum server: %v", err)
+		return fmt.Errorf("quantum server listen error: %v", err)
 	}
 	defer ln.Close()
 
 	conn, err := ln.Accept()
 	if err != nil {
-		logger.Error.Fatalf("Error accepting quantum connection: %v", err)
+		return fmt.Errorf("quantum connection accept error: %v", err)
 	}
 	p.QuantumConn = conn
 	logger.Info.Println("Quantum channel established")
+	return nil
 }
 
-func (p *Peer) startClassicalServer() {
-	ln, err := net.Listen("tcp", ClassicalPort)
+func (p *Peer) startClassicalServer() error {
+	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", p.LocalAddr, p.ClassicalPort))
 	if err != nil {
-		logger.Error.Fatalf("Error starting classical server: %v", err)
+		return fmt.Errorf("classical server listen error: %v", err)
 	}
 	defer ln.Close()
 
 	conn, err := ln.Accept()
 	if err != nil {
-		logger.Error.Fatalf("Error accepting classical connection: %v", err)
+		return fmt.Errorf("classical connection accept error: %v", err)
 	}
 	p.ClassicalConn = conn
 	logger.Info.Println("Classical channel established")
+	return nil
 }
 
-func (p *Peer) connectToPeer(peerAddr string) {
-	// Connect to quantum channel
-	quantumConn, err := net.Dial("tcp", peerAddr+QuantumPort)
+func (p *Peer) connectToPeer() error {
+	quantumDialer := &net.Dialer{Timeout: 10 * time.Second}
+	quantumConn, err := quantumDialer.DialContext(p.ctx, "tcp",
+		fmt.Sprintf("%s:%d", p.PeerAddr, p.QuantumPort))
 	if err != nil {
-		logger.Error.Printf("Quantum connection failed: %v", err)
-		return
+		return fmt.Errorf("quantum connection failed: %v", err)
 	}
 	p.QuantumConn = quantumConn
 
-	// Connect to classical channel
-	classicalConn, err := net.Dial("tcp", peerAddr+ClassicalPort)
+	classicalDialer := &net.Dialer{Timeout: 10 * time.Second}
+	classicalConn, err := classicalDialer.DialContext(p.ctx, "tcp",
+		fmt.Sprintf("%s:%d", p.PeerAddr, p.ClassicalPort))
 	if err != nil {
-		logger.Error.Printf("Classical connection failed: %v", err)
-		return
+		return fmt.Errorf("classical connection failed: %v", err)
 	}
 	p.ClassicalConn = classicalConn
+
+	return nil
 }
 
-func (p *Peer) initiateQKD() {
+func (p *Peer) initiateQKD() error {
 	const numQubits = 256
 
-	// Generate random bases and bits
 	bases := make([]int, numQubits)
 	bits := make([]int, numQubits)
 	for i := range bases {
-		bases[i] = rand.Intn(2)
-		bits[i] = rand.Intn(2)
+		bases[i] = cryptoRandBit()
+		bits[i] = cryptoRandBit()
 	}
 
-	// Send qubits over quantum channel
 	for i := 0; i < numQubits; i++ {
 		qubit := bits[i]
-		if bases[i] == 1 { // Use diagonal basis
+		if bases[i] == 1 {
 			qubit += 2
 		}
-		fmt.Fprintf(p.QuantumConn, "%d\n", qubit)
+		if _, err := fmt.Fprintf(p.QuantumConn, "%d\n", qubit); err != nil {
+			return fmt.Errorf("quantum channel send error: %v", err)
+		}
 	}
 
-	// Send bases over classical channel
-	fmt.Fprintf(p.ClassicalConn, "%v\n", bases)
+	if _, err := fmt.Fprintf(p.ClassicalConn, "%v\n", bases); err != nil {
+		return fmt.Errorf("classical channel send error: %v", err)
+	}
 
-	// Receive peer's bases
-	peerBasesStr, _ := bufio.NewReader(p.ClassicalConn).ReadString('\n')
+	peerBasesStr, err := bufio.NewReader(p.ClassicalConn).ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("reading peer bases error: %v", err)
+	}
+
 	var peerBases []int
 	for _, s := range strings.Fields(strings.TrimSpace(peerBasesStr)) {
-		val, _ := strconv.Atoi(s)
+		val, err := strconv.Atoi(s)
+		if err != nil {
+			logger.Error.Printf("Error parsing peer basis: %v", err)
+			continue
+		}
 		peerBases = append(peerBases, val)
 	}
 
-	// Generate shared key
+	p.Key = []int{}
 	for i := range bases {
 		if bases[i] == peerBases[i] {
+			if cryptoRandFloat() > 0.95 {
+				continue
+			}
 			p.Key = append(p.Key, bits[i])
 		}
 	}
 
 	logger.Info.Printf("Generated shared key (%d bits): %v", len(p.Key), p.Key)
+	return nil
+}
+
+func cryptoRandBit() int {
+	b := make([]byte, 1)
+	rand.Read(b)
+	return int(b[0] % 2)
+}
+
+func cryptoRandFloat() float64 {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return math.Abs(math.Float64frombits(binary.BigEndian.Uint64(b))) / math.MaxFloat64
+}
+
+func (p *Peer) Close() {
+	p.cancel()
+	if p.QuantumConn != nil {
+		p.QuantumConn.Close()
+	}
+	if p.ClassicalConn != nil {
+		p.ClassicalConn.Close()
+	}
 }
