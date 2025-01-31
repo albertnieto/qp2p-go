@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/albertnieto/qkd-p2p/pkg/logger"
+	"github.com/albertnieto/qp2p-go/pkg/logger"
 )
 
 const (
@@ -35,7 +35,7 @@ func (p *Peer) Start() {
 	go p.startQuantumServer()
 	go p.startClassicalServer()
 
-	p.connectToPeer(peerAddr)
+	p.connectToPeer(p.Address)
 
 	p.initiateQKD()
 }

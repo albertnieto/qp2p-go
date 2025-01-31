@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/albertnieto/qkd-p2p/internal/qkd"
-	"github.com/albertnieto/qkd-p2p/pkg/logger"
+	"github.com/albertnieto/qp2p-go/internal/qkd"
+	"github.com/albertnieto/qp2p-go/pkg/logger"
 )
 
 func main() {
@@ -13,7 +13,7 @@ func main() {
 		fmt.Println("Usage:")
 		fmt.Println("  go run qkd.go [local_ip:port] [peer_ip:port]")
 		fmt.Println("Example:")
-		fmt.Println("  go run qkd.go :8080 127.0.0.1:8081")
+		fmt.Println("  go run qkd.go 127.0.0.1:8080 127.0.0.1:8081")
 		return
 	}
 
